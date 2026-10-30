@@ -1,0 +1,178 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum SourceType {
+  TEXT
+  IMAGE
+}
+
+enum ReadingStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum CardState {
+  NEW
+  LEARNING
+  REVIEW
+  RELEARNING
+}
+
+enum Rating {
+  AGAIN
+  HARD
+  GOOD
+  EASY
+}
+
+enum FormKind {
+  KANJI
+  KANA
+}
+
+// The app is single-user for now; a User row still owns everything so
+// multiple accounts (and auth) can be added later without a data migration.
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  preferredLevel String?
+  createdAt      DateTime @default(now())
+
+  readings   Reading[]
+  vocabulary Vocabulary[]
+}
+
+model Reading {
+  id         String        @id @default(cuid())
+  userId     String
+  title      String
+  sourceType SourceType    @default(TEXT)
+  // Original text exactly as the user supplied it; never rewritten.
+  content    String
+  // Cached tokenizer output (Token[]), so opening a reading doesn't re-tokenize.
+  tokens     Json?
+  status     ReadingStatus @default(PROCESSING)
+  error      String?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  progress ReadingProgress?
+  contexts VocabularyContext[]
+
+  @@index([userId, updatedAt])
+}
+
+// Kept apart from Reading so content stays immutable and other formats can reuse it.
+model ReadingProgress {
+  id         String   @id @default(cuid())
+  readingId  String   @unique
+  // Index into the reading's token array.
+  position   Int      @default(0)
+  lastReadAt DateTime @default(now())
+
+  reading Reading @relation(fields: [readingId], references: [id], onDelete: Cascade)
+}
+
+model DictionaryEntry {
+  id       String  @id @default(cuid())
+  jmdictId Int     @unique
+  // [{ pos: string[], glosses: string[] }]
+  senses   Json
+  isCommon Boolean @default(false)
+
+  forms      DictionaryForm[]
+  vocabulary Vocabulary[]
+}
+
+// Every way to write an entry (kanji spellings and kana readings), one row each,
+// so lookups are a single indexed equality match instead of scanning arrays.
+model DictionaryForm {
+  id      String   @id @default(cuid())
+  entryId String
+  text    String
+  kind    FormKind
+
+  entry DictionaryEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  @@index([text])
+  @@index([entryId])
+}
+
+model Vocabulary {
+  id                String   @id @default(cuid())
+  userId            String
+  dictionaryEntryId String?
+  term              String
+  reading           String
+  // The learner's chosen meaning; may differ from the dictionary's preferred gloss.
+  meaning           String
+  partOfSpeech      String?
+  createdAt         DateTime @default(now())
+
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dictionaryEntry DictionaryEntry?    @relation(fields: [dictionaryEntryId], references: [id], onDelete: SetNull)
+  contexts        VocabularyContext[]
+  reviewState     ReviewState?
+  reviewLogs      ReviewLog[]
+
+  // One card per user per word+reading, however many times it's saved.
+  @@unique([userId, term, reading])
+  @@index([userId, createdAt])
+}
+
+model VocabularyContext {
+  id           String   @id @default(cuid())
+  vocabularyId String
+  readingId    String?
+  sentence     String
+  surfaceForm  String
+  createdAt    DateTime @default(now())
+
+  vocabulary Vocabulary @relation(fields: [vocabularyId], references: [id], onDelete: Cascade)
+  reading    Reading?   @relation(fields: [readingId], references: [id], onDelete: SetNull)
+
+  @@unique([vocabularyId, readingId, sentence])
+  @@index([vocabularyId])
+}
+
+// Latest scheduling state only; history lives in ReviewLog.
+model ReviewState {
+  vocabularyId String    @id
+  state        CardState @default(NEW)
+  dueAt        DateTime  @default(now())
+  intervalDays Int       @default(0)
+  ease         Float     @default(2.5)
+  reps         Int       @default(0)
+  lapses       Int       @default(0)
+  learningStep Int       @default(0)
+  updatedAt    DateTime  @updatedAt
+
+  vocabulary Vocabulary @relation(fields: [vocabularyId], references: [id], onDelete: Cascade)
+
+  @@index([dueAt])
+}
+
+// Append-only: one row per answer, never updated.
+model ReviewLog {
+  id           String    @id @default(cuid())
+  vocabularyId String
+  reviewedAt   DateTime  @default(now())
+  rating       Rating
+  durationMs   Int?
+  prevState    CardState
+  newState     CardState
+  intervalDays Int
+
+  vocabulary Vocabulary @relation(fields: [vocabularyId], references: [id], onDelete: Cascade)
+
+  @@index([vocabularyId, reviewedAt])
+  @@index([reviewedAt])
+}
